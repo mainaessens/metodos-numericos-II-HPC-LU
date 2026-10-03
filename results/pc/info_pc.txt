@@ -1,0 +1,9 @@
+               total        used        free      shared  buff/cache   available
+Mem:           6.6Gi       551Mi       6.1Gi       3.5Mi       180Mi       6.1Gi
+Swap:          2.0Gi          0B       2.0Gi
+
+CPU(s):                               16
+Model name:                           AMD Ryzen 7 7735HS with Radeon Graphics
+Thread(s) per core:                   2
+Core(s) per socket:                   8
+L3 cache:                             16 MiB (1 instance)
