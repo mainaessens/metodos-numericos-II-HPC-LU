@@ -21,20 +21,21 @@ set -u
 
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 BIN="$ROOT/bin"
-OUT="$ROOT/results/raw.csv"
+OUT=${OUT:-"$ROOT/results/raw.csv"}   # se puede pisar: OUT=results/pc-maia/raw.csv
 
 # --- parámetros (se pueden pisar desde el entorno) --------------------------
 REPS=${REPS:-5}                       # repeticiones por punto: nunca menos de 5
 SEED=${SEED:-42}
 PROCS=${PROCS:-"1 2 4 8 16"}          # ajustar a los cores del cluster
 N_STRONG=${N_STRONG:-"1000 2000 4000"}
+N_BREAK=${N_BREAK:-4000}              # N del experimento E4 (descomposicion)
 MPIRUN=${MPIRUN:-mpirun}
 MPIFLAGS=${MPIFLAGS:-""}              # p.ej. "--oversubscribe" en una notebook
 
 WHICH=${1:-all}
 
 # --- preparación ------------------------------------------------------------
-mkdir -p "$ROOT/results"
+mkdir -p "$(dirname "$OUT")"
 if [ ! -x "$BIN/lu_mpi" ]; then
     echo "No estan los binarios. Corriendo make..."
     (cd "$ROOT" && make) || exit 1
@@ -100,9 +101,9 @@ exp_breakdown() {
     log "E4: descomposicion del tiempo"
     for p in $PROCS; do
         for r in $(seq 1 "$REPS"); do
-            log "  mpi n=4000 p=$p rep=$r (split-idle)"
+            log "  mpi n=$N_BREAK p=$p rep=$r (split-idle)"
             $MPIRUN $MPIFLAGS -n "$p" "$BIN/lu_mpi" \
-                -n 4000 -k diagdom -s "$SEED" --split-idle --csv >> "$OUT"
+                -n "$N_BREAK" -k diagdom -s "$SEED" --split-idle --csv >> "$OUT"
         done
     done
 }
@@ -139,7 +140,9 @@ exp_precision() {
         done
     done
     log "  y la demostracion de por que hace falta pivotear:"
-    "$BIN/lu_serial" -n 200 -k zerodiag --nopivot --csv >> "$OUT" 2>&1 || \
+    # La salida de esta corrida NO va al CSV: es un fallo esperado y sus
+    # mensajes ensuciarian raw.csv. Se muestra en pantalla/log.
+    "$BIN/lu_serial" -n 200 -k zerodiag --nopivot --csv 2>&1 | sed 's/^/    /' ; [ "${PIPESTATUS[0]}" -eq 0 ] || \
         log "  (fallo como se esperaba: pivote nulo sin pivoteo)"
 }
 

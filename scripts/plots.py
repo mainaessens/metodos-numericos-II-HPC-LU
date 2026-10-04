@@ -8,7 +8,9 @@
 #  por punto experimental y genera las figuras en figuras/.
 #
 #  Requisitos:  pip install pandas matplotlib
-#  Uso:         python3 scripts/plots.py
+#  Uso:         python3 scripts/plots.py              (results/raw.csv -> figuras/)
+#               python3 scripts/plots.py pc-maia      (results/pc-maia/raw.csv
+#                                                      -> figuras/pc-maia/)
 #
 #  ---------------------------------------------------------------------------
 #  POR QUÉ LA MEDIANA Y NO EL PROMEDIO
@@ -33,8 +35,12 @@ except ImportError:
     sys.exit("Faltan dependencias.  pip install pandas matplotlib")
 
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
-RAW  = os.path.join(ROOT, "results", "raw.csv")
-FIGS = os.path.join(ROOT, "figuras")
+# Opcional: nombre del sistema (pc, cluster, pc-maia, cluster-maia, ...).
+# Con nombre, lee results/<sistema>/raw.csv y escribe en figuras/<sistema>/.
+SISTEMA = sys.argv[1].strip("/") if len(sys.argv) > 1 else ""
+RES  = os.path.join(ROOT, "results", SISTEMA)
+RAW  = os.path.join(RES, "raw.csv")
+FIGS = os.path.join(ROOT, "figuras", SISTEMA)
 os.makedirs(FIGS, exist_ok=True)
 
 # ---------------------------------------------------------------------------
@@ -81,10 +87,16 @@ plt.rcParams.update({
 def load():
     if not os.path.exists(RAW):
         sys.exit(f"No existe {RAW}.\nCorré primero:  ./scripts/run_experiments.sh")
-    df = pd.read_csv(RAW)
-    for c in ["t_total", "t_comp", "t_comm", "t_idle", "gflops", "residual"]:
+    # on_bad_lines="skip": descarta lineas basura (p.ej. mensajes de error que
+    # se hayan colado en el CSV) en vez de romper la lectura.
+    df = pd.read_csv(RAW, on_bad_lines="skip")
+    for c in ["n", "p", "t_total", "t_comp", "t_comm", "t_idle", "gflops", "residual"]:
         df[c] = pd.to_numeric(df[c], errors="coerce")
-    return df.dropna(subset=["t_total"])
+    df = df.dropna(subset=["n", "p", "t_total"])
+    df["n"] = df["n"].astype(int)
+    df["p"] = df["p"].astype(int)
+    df["t_idle"] = df["t_idle"].fillna(0)
+    return df
 
 
 def med(df, by, val="t_total"):
@@ -112,7 +124,7 @@ def save(fig, name):
     path = os.path.join(FIGS, name)
     fig.savefig(path)
     plt.close(fig)
-    print(f"  -> figuras/{name}")
+    print(f"  -> {os.path.relpath(path, ROOT)}")
 
 
 # ===========================================================================
@@ -127,7 +139,10 @@ def save(fig, name):
 # ===========================================================================
 def fig_strong(df):
     ser = df[(df.impl == "serial") & (df.variant == "pivot") & (df.kind == "diagdom")]
-    par = df[(df.impl == "mpi") & (df.dist == "cyclic") & (df.kind == "diagdom")]
+    # t_idle == 0 excluye las corridas con --split-idle (E4): sus barreras
+    # agregan overhead y NO deben usarse para el speedup.
+    par = df[(df.impl == "mpi") & (df.dist == "cyclic") & (df.kind == "diagdom")
+             & (df.t_idle == 0)]
     if ser.empty or par.empty:
         print("  (sin datos de escalabilidad fuerte)"); return
 
@@ -205,8 +220,11 @@ def fig_strong(df):
 #  componentes de un mismo todo: apilarlas es la forma correcta.
 # ===========================================================================
 def fig_breakdown(df):
+    # Se usan SOLO las corridas con --split-idle (t_idle > 0). Si no hay,
+    # se cae a las corridas comunes, donde la espera queda dentro de "comunicacion".
     d = df[(df.impl == "mpi") & (df.dist == "cyclic") & (df.t_idle > 0)]
     if d.empty:
+        print("  (aviso: no hay corridas con --split-idle; el ocioso queda en 0)")
         d = df[(df.impl == "mpi") & (df.dist == "cyclic")]
     if d.empty:
         print("  (sin datos de descomposicion)"); return
@@ -292,7 +310,7 @@ def fig_weak(df):
     # Los puntos de escalabilidad débil son los que cumplen n ≈ 1000·p^(1/3).
     d["esperado"] = (1000 * d.p ** (1/3)).round()
     d = d[(d.n - d.esperado).abs() <= 2]
-    if len(d) < 2:
+    if d.p.nunique() < 2:          # hace falta al menos 2 valores de p
         print("  (sin datos de escalabilidad debil)"); return
 
     g = med(d, ["p"]).sort_values("p")
@@ -353,19 +371,27 @@ def fig_precision(df):
 # ===========================================================================
 def tabla(df):
     ser = df[(df.impl == "serial") & (df.variant == "pivot") & (df.kind == "diagdom")]
-    par = df[(df.impl == "mpi") & (df.dist == "cyclic") & (df.kind == "diagdom")]
+    # t_idle == 0 excluye las corridas con --split-idle (E4): sus barreras
+    # agregan overhead y NO deben usarse para el speedup.
+    par = df[(df.impl == "mpi") & (df.dist == "cyclic") & (df.kind == "diagdom")
+             & (df.t_idle == 0)]
     if ser.empty or par.empty: return
 
     t1 = med(ser, ["n"]).set_index("n")["med"].to_dict()
     mp = med(par, ["n", "p"])
 
-    path = os.path.join(ROOT, "results", "resumen.md")
+    path = os.path.join(RES, "resumen.md")
     with open(path, "w", encoding="utf-8") as f:
         f.write("# Resumen de resultados\n\n")
         f.write("Mediana de las repeticiones. T1 = version serial pura.\n\n")
         f.write("| N | p | T(p) [s] | min-max [s] | reps | Speedup | Eficiencia | GFLOP/s |\n")
         f.write("|---|---|---|---|---|---|---|---|\n")
+        # Solo los N de escalabilidad fuerte (2 o mas valores de p): asi no se
+        # cuelan las corridas sueltas del experimento de precision.
+        cuenta_p = mp.groupby("n")["p"].nunique()
         for n in sorted(set(mp.n) & set(t1)):
+            if cuenta_p.get(n, 0) < 2:
+                continue
             f.write(f"| {n} | 1 (serial) | {t1[n]:.4f} | - | - | 1.00 | 100% | - |\n")
             for _, r in mp[mp.n == n].sort_values("p").iterrows():
                 sp = t1[n] / r["med"]
@@ -374,11 +400,11 @@ def tabla(df):
                         f"{sp:.2f} | {100*sp/r.p:.0f}% | "
                         f"{(2/3)*n**3/r['med']/1e9:.2f} |\n")
         f.write("\n")
-    print(f"  -> results/resumen.md")
+    print(f"  -> {os.path.relpath(path, ROOT)}")
 
 
 def main():
-    print("Leyendo results/raw.csv ...")
+    print(f"Leyendo {os.path.relpath(RAW, ROOT)} ...")
     df = load()
     print(f"  {len(df)} corridas\n")
     print("Generando figuras:")
