@@ -1,22 +1,9 @@
-# binarios y objetos
+# ejecutables compilados
+LU_Serial
+LU_MPI
+*.exe
+*.o
+
+# carpetas de la version anterior
 bin/
 build/
-*.o
-*.out
-
-# salidas de jobs del cluster
-logs/
-
-# temporales de editores
-*~
-*.swp
-.DS_Store
-
-# python
-__pycache__/
-*.pyc
-.ipynb_checkpoints/
-
-# NO se ignoran:
-#   results/*.csv   -> los datos crudos son parte de la entrega
-#   figuras/*.png   -> las figuras van al informe

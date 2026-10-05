@@ -1,170 +1,112 @@
-# Factorización LU Paralela con MPI
+# Factorización LU paralela (A = LU) — versión simple
 
-**Proyecto 6 · Métodos Numéricos II y Computación Científica**
-Facultad de Ciencias Exactas y Tecnología — Universidad Nacional de Tucumán — 2026
+Proyecto 6 de Métodos Numéricos II / Computación Científica (FACET-UNT).
+Maia Naessens y Ezequiel Martínez.
 
----
+Hay solo dos programas, cada uno en un único archivo `.c`, sin bibliotecas propias ni `.h`:
 
-## El problema
-
-La factorización LU descompone una matriz cuadrada invertible `A` en el
-producto de una triangular inferior `L` por una triangular superior `U`,
-constituyendo la base del cálculo de sistemas de ecuaciones lineales `Ax = b`.
-
-Este proyecto implementa la **eliminación gaussiana con pivoteo parcial en
-paralelo** sobre memoria distribuida (MPI), y analiza:
-
-- cómo escalan el **tiempo de cómputo** y el de **comunicación** al incrementar N,
-- el **speedup** y la **eficiencia** alcanzados,
-- la **precisión numérica** medida por el residuo `‖Ax − b‖`.
-
----
-
-## Arranque rápido
-
-```bash
-make                              # compila bin/lu_serial y bin/lu_mpi
-make test                         # validación: serial vs MPI con p = 1,2,3,4,5,7
-
-./bin/lu_serial -n 2000
-mpirun -n 8 ./bin/lu_mpi -n 2000
-```
-
-Requiere `gcc`, una implementación de MPI (`mpicc` / `mpirun`), y —para las
-figuras— Python con `pandas` y `matplotlib`.
-
-### Batería completa de experimentos
-
-```bash
-./scripts/run_experiments.sh all      # produce results/raw.csv
-python3 scripts/plots.py              # produce figuras/ y results/resumen.md
-```
-
-En el cluster, lanzar desde un job: `sbatch scripts/job.slurm`
-(editar antes con los valores reales del cluster).
-
----
-
-## Opciones
-
-### `bin/lu_serial`
-
-| Opción | Qué hace |
+| Archivo | Qué hace |
 |---|---|
-| `-n <int>` | dimensión de la matriz (default 1000) |
-| `-k <tipo>` | `random` · `diagdom` · `hilbert` · `zerodiag` (default `diagdom`) |
-| `-s <int>` | semilla (default 42) |
-| `-r <int>` | repeticiones cronometradas |
-| `--nopivot` | factorizar **sin** pivoteo (experimento de estabilidad) |
-| `--csv` | una línea CSV en vez del reporte legible |
+| `LU_Serial.c` | Factoriza A = LU en un solo proceso. Es la referencia para comparar. |
+| `LU_MPI.c` | Hace la misma factorización repartiendo las filas entre P procesos con MPI. |
 
-### `bin/lu_mpi`
+Los dos generan **la misma matriz** (misma semilla), así que tienen que dar el mismo
+residuo y el mismo error. Esa es la primera forma de comprobar que la versión paralela está bien.
 
-Las mismas, más:
+## Qué hacen los programas
 
-| Opción | Qué hace |
-|---|---|
-| `-d <reparto>` | `cyclic` (default) · `block` |
-| `--split-idle` | barreras para medir el tiempo ocioso por separado |
+1. Generan una matriz A de N × N **diagonalmente dominante** (a cada elemento de la
+   diagonal se le suma N) y un vector b = A · (1, 1, …, 1). Así la solución exacta es x = 1.
+2. Factorizan A = LU por eliminación gaussiana **sin pivoteo**. Como A es
+   diagonalmente dominante, no hace falta pivotear: nunca aparece un pivote cero o muy chico.
+   L y U se guardan en la misma matriz (L debajo de la diagonal, con 1 en la diagonal; U en
+   la diagonal y arriba).
+3. Resuelven L y = b (hacia adelante) y U x = y (hacia atrás).
+4. Muestran el tiempo de la factorización, el residuo ‖Ax − b‖ y el error máximo |x − 1|.
 
----
+### Cómo se paraleliza (`LU_MPI.c`)
 
-## Estructura
+- **Reparto cíclico por filas:** la fila i la tiene el proceso `i % P`.
+  Con P = 4 y N = 8:
 
-```
-├── include/lu.h            declaraciones comunes
-├── src/
-│   ├── matgen.c            generación reproducible de matrices
-│   ├── verify.c            normas, residuo, factor de crecimiento, reloj
-│   ├── lu_serial.c         LU serial con pivoteo parcial (la referencia)
-│   └── lu_mpi.c            LU paralela con MPI (el proyecto)
-├── scripts/
-│   ├── run_experiments.sh  batería completa de corridas
-│   ├── job.slurm           plantilla de job para el cluster
-│   └── plots.py            estadística y figuras
-├── docs/                   ← GUÍA DE ESTUDIO, empezar por acá
-├── results/                CSV crudos de las corridas
-├── figuras/                figuras del informe
-└── informe/                estructura y referencias
-```
+  | Proceso | Filas globales |
+  |---|---|
+  | 0 | 0, 4 |
+  | 1 | 1, 5 |
+  | 2 | 2, 6 |
+  | 3 | 3, 7 |
 
----
+- El proceso 0 genera A, la ordena y la reparte con `MPI_Scatter`.
+- En cada paso k, el dueño de la fila k (proceso `k % P`) la envía a todos con `MPI_Bcast`
+  (solo las columnas k…N−1), y cada proceso actualiza sus filas que están debajo de k.
+- Al final, el proceso 0 junta todo con `MPI_Gather`, resuelve el sistema y verifica.
+- Los tiempos se miden con `MPI_Wtime` y se toma el del proceso más lento con `MPI_Reduce` (`MPI_MAX`).
 
-## Documentación
+Se usa el reparto cíclico y no por bloques para **balancear la carga**: a medida que k avanza,
+las filas de arriba ya terminaron. Con bloques, los primeros procesos se quedarían sin
+trabajo; con el reparto cíclico todos siguen teniendo filas por debajo de k.
 
-La carpeta [`docs/`](docs/) es una guía de estudio completa, escrita asumiendo
-que no sabés qué es la factorización LU ni cómo se programa con MPI.
+Funciones MPI usadas (todas vistas en la teoría o en el TP1): `MPI_Init`, `MPI_Comm_rank`,
+`MPI_Comm_size`, `MPI_Finalize`, `MPI_Wtime`, `MPI_Barrier`, `MPI_Scatter`, `MPI_Bcast`,
+`MPI_Gather`, `MPI_Reduce`.
 
-| # | Documento |
-|---|---|
-| 01 | [¿Qué es la factorización LU?](docs/01-que-es-la-factorizacion-lu.md) |
-| 02 | [Pivoteo y estabilidad numérica](docs/02-pivoteo-y-estabilidad.md) |
-| 03 | [Costo y por qué paralelizar](docs/03-costo-y-por-que-paralelizar.md) |
-| 04 | [MPI desde cero](docs/04-mpi-desde-cero.md) |
-| 05 | [LU en paralelo](docs/05-lu-en-paralelo.md) |
-| 06 | [El código, explicado](docs/06-el-codigo-explicado.md) |
-| 07 | [Experimentos y métricas](docs/07-experimentos-y-metricas.md) |
-| 08 | [Guía del cluster](docs/08-guia-del-cluster.md) |
-| 09 | [Errores frecuentes](docs/09-errores-frecuentes.md) |
-| 10 | [Preguntas de defensa](docs/10-preguntas-de-defensa.md) |
+## Cómo compilar y correr en la PC
 
----
-
-## Decisiones de diseño
-
-| Decisión | Elección | Por qué |
-|---|---|---|
-| Distribución de datos | **Cíclica por filas** | La eliminación consume la matriz de arriba hacia abajo; con bloques contiguos la eficiencia máxima alcanzable es 50 % |
-| Variante del algoritmo | **Right-looking** (kij) | Expone la actualización de la submatriz como un bloque grande de trabajo independiente |
-| Pivoteo | **Parcial** | Estabilidad a costo `O(n²)`; el completo cuesta `O(n³)` |
-| Búsqueda del pivote | **`MPI_Allreduce` + `MPI_MAXLOC`** | Nadie tiene la columna entera; MAXLOC devuelve valor e índice en una colectiva |
-| Difusión del panel | **`MPI_Bcast`**, solo desde la columna `k` | Colectiva optimizada; difundir desde `k` reduce el volumen a la mitad |
-| Intercambio de filas | **`MPI_Sendrecv_replace`** | `Send` + `Recv` simétricos son deadlock con mensajes grandes |
-| Almacenamiento | **In-place** sobre A | Mitad de memoria; la diagonal de L es de unos y no se guarda |
-| Layout de memoria | **1D contiguo** `A[i*n+j]` | MPI necesita buffers contiguos; además respeta la localidad de cache |
-| Generación de matrices | **Hash posicional sin estado** | Cada proceso genera sus filas sin que nadie aloque `n²`, y serial y paralelo resuelven el mismo sistema |
-
-El razonamiento completo está en [`docs/05`](docs/05-lu-en-paralelo.md).
-
----
-
-## Verificación
+Hace falta Linux o WSL (Ubuntu) con `gcc` y OpenMPI. Si no están instalados:
 
 ```bash
-make test
+sudo apt update
+sudo apt install build-essential openmpi-bin libopenmpi-dev
 ```
 
-El residuo relativo `‖Ax−b‖∞ / (‖A‖∞‖x‖∞)` del paralelo debe ser **idéntico**
-al del serial para cualquier número de procesos, incluidos los que no dividen
-a `n`:
-
-```
-serial : 1.232598e-15
-p = 1  : 1.232598e-15
-p = 2  : 1.232598e-15
-p = 3  : 1.232598e-15
-p = 4  : 1.232598e-15
-p = 5  : 1.232598e-15
-p = 7  : 1.232598e-15
-```
-
-Y la demostración de por qué el pivoteo no es opcional:
+Compilar (desde la carpeta del repo):
 
 ```bash
-./bin/lu_serial -n 200 -k zerodiag              # residuo ~1e-16
-./bin/lu_serial -n 200 -k zerodiag --nopivot    # FALLO: pivote nulo en k=0
+gcc -O2 -o LU_Serial LU_Serial.c -lm
+mpicc -O2 -o LU_MPI LU_MPI.c -lm
 ```
 
----
+Correr (el número es N, el tamaño de la matriz; si no se pone, usa N = 1000):
 
-## Equipo
+```bash
+./LU_Serial 1000
+mpirun -np 4 ./LU_MPI 1000
+```
 
-- *(completar)*
-- *(completar)*
-- *(completar)*
+- **N tiene que ser múltiplo de la cantidad de procesos** (por ejemplo N = 1200 sirve
+  para 1, 2, 3, 4, 6 y 8 procesos). Si no, el programa avisa y termina.
+- Si `mpirun` dice que no hay suficientes "slots" (pediste más procesos que núcleos),
+  agregá `--oversubscribe`: `mpirun --oversubscribe -np 8 ./LU_MPI 1200`.
 
----
+## Cómo correr en el cluster (CCAD-UNC)
 
-## Referencias
+1. Entrar a `lab.ccad.unc.edu.ar` y abrir una terminal.
+2. Subir `LU_Serial.c` y `LU_MPI.c` (o clonar el repo con `git clone`).
+3. Si `mpicc` no se encuentra, cargar los módulos: `module load gcc openmpi`
+   (con `module avail` se ve qué hay disponible).
+4. Compilar y correr igual que en la PC:
 
-En [`informe/referencias.md`](informe/referencias.md).
+```bash
+gcc -O2 -o LU_Serial LU_Serial.c -lm
+mpicc -O2 -o LU_MPI LU_MPI.c -lm
+./LU_Serial 2000
+mpirun -np 8 ./LU_MPI 2000
+```
+
+## Cómo leer la salida
+
+```
+LU MPI  N = 1200  procesos = 4
+Tiempo de factorizacion: 0.267761 s
+Tiempo total (con Scatter y Gather): 0.274157 s
+Residuo ||Ax - b||:      1.150686e-10
+Error maximo |x - 1|:    9.325873e-15
+```
+
+- **Tiempo de factorización:** solo el bucle de eliminación (cálculo + `MPI_Bcast` de cada fila pivote).
+- **Tiempo total:** agrega el reparto inicial (`MPI_Scatter`) y la recolección final (`MPI_Gather`).
+  La diferencia entre los dos es el costo de mover la matriz.
+- **Residuo y error:** tienen que ser chicos (del orden de 1e-10 o menos) e **iguales** a los
+  de `LU_Serial` con el mismo N. Si dan distinto, la versión paralela tiene un error.
+
+Speedup: S(P) = tiempo de `LU_Serial` / tiempo de `LU_MPI` con P procesos.
