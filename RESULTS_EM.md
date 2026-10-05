@@ -36,6 +36,7 @@ repeticiones. T₁ es la versión serial pura, no MPI con p = 1.
 | PC | Precisión | 100, 200, 500, 1000 · 4 tipos de matriz | serial y 4 |
 | PC | Reparto cíclico vs bloques (E5) | 2000 | 2, 4, 8 |
 | Cluster | Escalabilidad fuerte | 1000, 2000, 4000, 8000 | serial, 2, 4, 8, 16, 32 |
+| Cluster | Reparto cíclico vs bloques (E5) | 2000 | 8, 16, 32 |
 
 La precisión se corrió solo en la PC: el residuo depende del algoritmo y de la
 aritmética IEEE 754, no del hardware.
@@ -50,6 +51,7 @@ PROCS="2 4 8" REPS=5 ./scripts/run_experiments.sh dist
 
 # Cluster
 PROCS="2 4 8 16 32" N_STRONG="1000 2000 4000 8000" REPS=5 ./scripts/run_experiments.sh strong
+PROCS="8 16 32" REPS=5 ./scripts/run_experiments.sh dist
 ```
 
 ---
@@ -65,8 +67,8 @@ PROCS="2 4 8 16 32" N_STRONG="1000 2000 4000 8000" REPS=5 ./scripts/run_experime
 | `figuras/<sistema>/fig2_eficiencia.png` | Eficiencia según p |
 | `figuras/<sistema>/fig3_descomposicion.png` | Cómputo vs comunicación, para el N que elige el script |
 | `figuras/pc/fig6_residuo.png` | Residuo relativo según N, por tipo de matriz |
-| `results/pc/raw_e5.csv` | Corridas del E5 (cíclico vs bloques), separadas para no mezclarlas con escalabilidad fuerte |
-| `figuras/pc/fig4_reparto.png` | Tiempo con reparto cíclico vs bloques, según p |
+| `results/<sistema>/raw_e5.csv` | Corridas del E5 (cíclico vs bloques), separadas para no mezclarlas con escalabilidad fuerte |
+| `figuras/<sistema>/fig4_reparto.png` | Tiempo con reparto cíclico vs bloques, según p |
 
 ---
 
@@ -119,18 +121,22 @@ llega a 3.4 con p = 8 y después baja: hay 2N colectivas por factorización y
 no se achican con p, mientras que el cómputo por proceso sí. En la PC, con
 N = 1000 y p = 8, la comunicación es el 57 % del tiempo.
 
-**Reparto cíclico vs bloques (PC, N = 2000).** El reparto cíclico es más
-rápido con todos los p probados:
+**Reparto cíclico vs bloques (N = 2000).** El reparto cíclico es más rápido
+con todos los p probados, en los dos sistemas:
 
-| p | Cíclico | Bloques | Bloques tarda |
-|---|---|---|---|
-| 2 | 1.31 s | 1.60 s | +22 % |
-| 4 | 0.99 s | 1.12 s | +13 % |
-| 8 | 0.81 s | 0.89 s | +10 % |
+| Sistema | p | Cíclico | Bloques | Bloques tarda |
+|---|---|---|---|---|
+| PC | 2 | 1.31 s | 1.60 s | +22 % |
+| PC | 4 | 0.99 s | 1.12 s | +13 % |
+| PC | 8 | 0.81 s | 0.89 s | +10 % |
+| Cluster | 8 | 0.128 s | 0.160 s | +25 % |
+| Cluster | 16 | 0.100 s | 0.115 s | +15 % |
+| Cluster | 32 | 0.094 s | 0.103 s | +10 % |
 
 El tiempo de cómputo promedio por proceso es casi igual en los dos repartos
-(con p = 2: 1.23 s y 1.22 s). La diferencia está en la "comunicación", que con
-bloques sube de 0.08 s a 0.38 s. Como no se usó `--split-idle`, esa columna
+(en la PC con p = 2: 1.23 s y 1.22 s). La diferencia está en la
+"comunicación", que con bloques sube de 0.08 s a 0.38 s en la PC, y de
+0.035 s a 0.076 s en el cluster con p = 8. Como no se usó `--split-idle`, esa columna
 incluye la espera: con bloques, los procesos dueños de las primeras filas se
 quedan sin trabajo a medida que avanza k y esperan en cada `MPI_Bcast` al
 proceso que todavía tiene filas por actualizar. Es el desbalance de carga que
