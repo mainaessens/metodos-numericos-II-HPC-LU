@@ -34,6 +34,7 @@ repeticiones. T₁ es la versión serial pura, no MPI con p = 1.
 |---|---|---|---|
 | PC | Escalabilidad fuerte | 1000, 2000, 4000 | serial, 2, 4, 8 |
 | PC | Precisión | 100, 200, 500, 1000 · 4 tipos de matriz | serial y 4 |
+| PC | Reparto cíclico vs bloques (E5) | 2000 | 2, 4, 8 |
 | Cluster | Escalabilidad fuerte | 1000, 2000, 4000, 8000 | serial, 2, 4, 8, 16, 32 |
 
 La precisión se corrió solo en la PC: el residuo depende del algoritmo y de la
@@ -45,6 +46,7 @@ Comandos usados:
 # PC
 PROCS="2 4 8" N_STRONG="1000 2000 4000" REPS=5 ./scripts/run_experiments.sh strong
 ./scripts/run_experiments.sh precision
+PROCS="2 4 8" REPS=5 ./scripts/run_experiments.sh dist
 
 # Cluster
 PROCS="2 4 8 16 32" N_STRONG="1000 2000 4000 8000" REPS=5 ./scripts/run_experiments.sh strong
@@ -63,6 +65,8 @@ PROCS="2 4 8 16 32" N_STRONG="1000 2000 4000 8000" REPS=5 ./scripts/run_experime
 | `figuras/<sistema>/fig2_eficiencia.png` | Eficiencia según p |
 | `figuras/<sistema>/fig3_descomposicion.png` | Cómputo vs comunicación, para el N que elige el script |
 | `figuras/pc/fig6_residuo.png` | Residuo relativo según N, por tipo de matriz |
+| `results/pc/raw_e5.csv` | Corridas del E5 (cíclico vs bloques), separadas para no mezclarlas con escalabilidad fuerte |
+| `figuras/pc/fig4_reparto.png` | Tiempo con reparto cíclico vs bloques, según p |
 
 ---
 
@@ -114,6 +118,23 @@ speedup queda cerca de 1.4 para todos los N, igual que en la PC.
 llega a 3.4 con p = 8 y después baja: hay 2N colectivas por factorización y
 no se achican con p, mientras que el cómputo por proceso sí. En la PC, con
 N = 1000 y p = 8, la comunicación es el 57 % del tiempo.
+
+**Reparto cíclico vs bloques (PC, N = 2000).** El reparto cíclico es más
+rápido con todos los p probados:
+
+| p | Cíclico | Bloques | Bloques tarda |
+|---|---|---|---|
+| 2 | 1.31 s | 1.60 s | +22 % |
+| 4 | 0.99 s | 1.12 s | +13 % |
+| 8 | 0.81 s | 0.89 s | +10 % |
+
+El tiempo de cómputo promedio por proceso es casi igual en los dos repartos
+(con p = 2: 1.23 s y 1.22 s). La diferencia está en la "comunicación", que con
+bloques sube de 0.08 s a 0.38 s. Como no se usó `--split-idle`, esa columna
+incluye la espera: con bloques, los procesos dueños de las primeras filas se
+quedan sin trabajo a medida que avanza k y esperan en cada `MPI_Bcast` al
+proceso que todavía tiene filas por actualizar. Es el desbalance de carga que
+el reparto cíclico evita.
 
 **Precisión.** El residuo relativo queda entre 1e-16 y 5e-15 para las matrices
 bien condicionadas (diagonal dominante, aleatoria y diagonal nula). La matriz de
