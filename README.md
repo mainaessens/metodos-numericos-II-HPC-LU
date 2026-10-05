@@ -14,38 +14,54 @@ Hay solo dos programas, cada uno en un único archivo `.c`, sin bibliotecas prop
 
 | Archivo | Qué hace |
 |---|---|
-| `LU_Serial.c` | Factoriza A = LU en un solo proceso. Es la referencia para el speedup. |
+| `LU_Serial.c` | Factoriza P·A = L·U en un solo proceso. Es la referencia para el speedup. |
 | `LU_MPI.c` | Hace la misma factorización repartiendo las filas entre P procesos con MPI. |
 
-Los dos generan **la misma matriz** (misma semilla), así que tienen que dar el mismo
-residuo y el mismo error. Esa es la primera forma de comprobar que la versión paralela está bien.
+Los dos generan **la misma matriz y el mismo vector** (misma semilla), así que tienen que
+dar **exactamente el mismo residuo**. Esa es la primera forma de comprobar que la versión
+paralela está bien.
 
 ## Dónde se cumple cada parte de la consigna
 
 | Lo que pide la consigna | Dónde está |
 |---|---|
-| A = L·U con A cuadrada invertible | A es diagonalmente dominante ⇒ invertible. `factorizar_lu` en `LU_Serial.c`; el bucle de `k` en `LU_MPI.c`. |
-| Base del cálculo de Ax = b | `resolver`: sustitución hacia adelante (Ly = b) y hacia atrás (Ux = y), en los dos archivos. |
-| Implementación paralela de la eliminación gaussiana | `LU_MPI.c`: reparto cíclico de filas + `MPI_Bcast` de la fila pivote en cada paso. |
+| A = L·U con A cuadrada invertible | `factorizar_lu` en `LU_Serial.c`; el bucle de `k` en `LU_MPI.c`. A se genera al azar: es invertible con probabilidad 1. |
+| Base del cálculo de Ax = b | `resolver`: sustitución hacia adelante (Ly = Pb) y hacia atrás (Ux = y), en los dos archivos. |
+| Implementación paralela de la eliminación gaussiana | `LU_MPI.c`: reparto cíclico de filas + pivoteo parcial distribuido + `MPI_Bcast` de la fila pivote en cada paso. |
 | Cómo escala el **tiempo de cómputo** al incrementar N | Los dos programas imprimen *Tiempo de cómputo* por separado. |
-| Cómo escala la **comunicación** al incrementar N | `LU_MPI.c` acumula aparte el tiempo de `MPI_Scatter`, `MPI_Bcast` y `MPI_Gather` e imprime *Tiempo de comunicación*. |
+| Cómo escala la **comunicación** al incrementar N | `LU_MPI.c` acumula aparte el tiempo de todas las llamadas MPI e imprime *Tiempo de comunicación*. |
 | **Speedup** | Tiempo total de `LU_Serial` ÷ tiempo total de `LU_MPI` con P procesos. Los dos usan reloj de pared, así que son comparables. |
-| **Precisión del error residual ‖Ax − b‖** | Los dos imprimen el residuo, el residuo relativo ‖Ax − b‖/‖b‖ y el error máximo \|x − 1\|. |
+| **Precisión del error residual ‖Ax − b‖** | Los dos imprimen el residuo ‖Ax − b‖ y el residuo relativo ‖Ax − b‖/‖b‖. |
 
 ## Qué hacen los programas
 
-1. Generan una matriz A de N × N **diagonalmente dominante** (a cada elemento de la
-   diagonal se le suma N) y un vector b = A · (1, 1, …, 1). Así la solución exacta es x = 1
-   y se puede medir el error directamente.
-2. Factorizan A = LU por eliminación gaussiana **sin pivoteo**. Como A es
-   diagonalmente dominante, no hace falta pivotear: nunca aparece un pivote cero o muy chico.
-   L y U se guardan en la misma matriz (L debajo de la diagonal, con 1 en la diagonal; U en
-   la diagonal y arriba), así no se usa memoria de más.
-3. Resuelven L y = b (hacia adelante) y U x = y (hacia atrás).
-4. Muestran los tiempos, el residuo ‖Ax − b‖, el residuo relativo y el error máximo |x − 1|.
+1. Generan **al azar** una matriz A de N × N y un vector b, con valores uniformes
+   en [−1, 1] y semilla fija.
+2. Factorizan **P·A = L·U** por eliminación gaussiana **con pivoteo parcial**.
+   L y U se guardan en la misma matriz (L debajo de la diagonal, con 1 en la diagonal;
+   U en la diagonal y arriba), así no se usa memoria de más. La permutación P se guarda
+   como un vector de índices `perm`, no como matriz.
+3. Resuelven L y = P·b (hacia adelante) y U x = y (hacia atrás).
+4. Muestran los tiempos, el residuo ‖Ax − b‖ y el residuo relativo.
 
 El costo de la factorización es aproximadamente **(2/3)·N³** operaciones; por eso al duplicar
 N el tiempo de cómputo se multiplica por ~8.
+
+### Por qué hace falta pivotear
+
+Como A se genera al azar, **no** es diagonalmente dominante: en la columna k puede aparecer
+un pivote muy chico (o cero), y dividir por él amplifica los errores de redondeo.
+
+El **pivoteo parcial** busca, en la columna k de la fila k para abajo, el elemento de mayor
+valor absoluto, e intercambia esa fila con la fila k. Así todos los multiplicadores cumplen
+|l_ik| ≤ 1 y el error no se amplifica. Medido sobre la misma matriz, con N = 1200:
+
+| | Residuo relativo ‖Ax − b‖/‖b‖ |
+|---|---|
+| Sin pivoteo | 5.85 × 10⁻¹⁰ |
+| **Con pivoteo parcial** | **2.55 × 10⁻¹²** |
+
+Es decir, unas **230 veces más preciso** por el solo hecho de elegir bien el pivote.
 
 ### Cómo se paraleliza (`LU_MPI.c`)
 
@@ -59,20 +75,34 @@ N el tiempo de cómputo se multiplica por ~8.
   | 2 | 2, 6 |
   | 3 | 3, 7 |
 
+  Se usa el reparto cíclico y no por bloques para **balancear la carga**: a medida que k
+  avanza, las filas de arriba ya terminaron. Con bloques, los primeros procesos se quedarían
+  sin trabajo; con el reparto cíclico todos siguen teniendo filas por debajo de k.
+
 - El proceso 0 genera A, la ordena y la reparte con `MPI_Scatter`.
-- En cada paso k, el dueño de la fila k (proceso `k % P`) la envía a todos con `MPI_Bcast`
-  (solo las columnas k…N−1, lo anterior ya no se usa), y cada proceso actualiza sus filas
-  que están debajo de k.
-- Al final, el proceso 0 junta todo con `MPI_Gather`, resuelve el sistema y verifica.
-- Los tiempos se miden con `MPI_Wtime` y se toma el del proceso más lento con `MPI_Reduce` (`MPI_MAX`).
+- En **cada paso k** se hacen cuatro cosas:
 
-Se usa el reparto cíclico y no por bloques para **balancear la carga**: a medida que k avanza,
-las filas de arriba ya terminaron. Con bloques, los primeros procesos se quedarían sin
-trabajo; con el reparto cíclico todos siguen teniendo filas por debajo de k.
+  1. **Búsqueda local del pivote** (cómputo): cada proceso busca, entre *sus* filas i ≥ k,
+     la de mayor |a_ik|.
+  2. **Elección global del pivote** (comunicación): el proceso 0 junta los P candidatos con
+     `MPI_Gather`, elige el mayor de todos y avisa a todos cuál es la fila pivote con
+     `MPI_Bcast`.
+  3. **Intercambio de filas** (comunicación): la fila k y la fila pivote se intercambian
+     enteras. Si están en el mismo proceso es un intercambio local; si están en procesos
+     distintos, los dos dueños se las mandan con `MPI_Send` / `MPI_Recv`. Para que no se
+     queden los dos esperando a la vez (*deadlock*), el de rank menor manda primero y
+     después recibe, y el otro al revés.
+  4. **Eliminación**: el dueño de la fila k la difunde con `MPI_Bcast` (solo las columnas
+     k…N−1, lo anterior ya no se usa) y cada proceso actualiza sus filas que están debajo de k.
 
-Funciones MPI usadas (todas vistas en la teoría o en el TP1): `MPI_Init`, `MPI_Comm_rank`,
+- Al final, el proceso 0 junta todo con `MPI_Gather`, aplica la permutación a b, resuelve el
+  sistema y calcula el residuo contra la A **original**.
+- Los tiempos se miden con `MPI_Wtime`; el proceso 0 los junta con `MPI_Gather` y se queda
+  con el del proceso más lento.
+
+Funciones MPI usadas (todas vistas en la teoría / TP1): `MPI_Init`, `MPI_Comm_rank`,
 `MPI_Comm_size`, `MPI_Finalize`, `MPI_Wtime`, `MPI_Barrier`, `MPI_Scatter`, `MPI_Bcast`,
-`MPI_Gather`, `MPI_Reduce`.
+`MPI_Gather`, `MPI_Send`, `MPI_Recv`.
 
 ## Cómo compilar y correr en la PC
 
@@ -121,18 +151,19 @@ mpirun -np 8 ./LU_MPI 2000
 ## Cómo leer la salida
 
 ```
-LU MPI  N = 1200  procesos = 2
-Tiempo de computo:        0.177995 s
-Tiempo de comunicacion:   0.039311 s
-Tiempo total:             0.199276 s
-Residuo ||Ax - b||:       1.150686e-10
-Residuo relativo:         1.845492e-15
-Error maximo |x - 1|:     9.325873e-15
-CSV,1200,2,0.177995,0.039311,0.199276,1.150686e-10,1.845492e-15
+LU MPI (con pivoteo parcial)  N = 1200  procesos = 2
+Tiempo de computo:        0.112541 s
+Tiempo de comunicacion:   0.022785 s
+Tiempo total:             0.134512 s
+Residuo ||Ax - b||:       5.125055e-11
+Residuo relativo:         2.553602e-12
+CSV,1200,2,0.112541,0.022785,0.134512,5.125055e-11,2.553602e-12
 ```
 
-- **Tiempo de cómputo:** solo las cuentas (los multiplicadores y la actualización de las filas).
-- **Tiempo de comunicación:** `MPI_Scatter` + todos los `MPI_Bcast` + `MPI_Gather`.
+- **Tiempo de cómputo:** las cuentas (búsqueda local del pivote, multiplicadores y
+  actualización de las filas).
+- **Tiempo de comunicación:** `MPI_Scatter` + las colectivas del pivoteo + los
+  `MPI_Send`/`MPI_Recv` de los intercambios + los `MPI_Bcast` de la fila pivote + `MPI_Gather`.
 - **Tiempo total:** desde que arrancan todos los procesos hasta que termina el `Gather`.
 - **Residuo relativo:** es el que conviene comparar entre distintos N, porque el residuo
   absoluto crece con N aunque la precisión sea la misma.
@@ -143,7 +174,7 @@ Dos aclaraciones para la defensa:
 
 1. **Cómputo + comunicación no da exactamente el total**, porque cada máximo puede venir
    de un proceso distinto.
-2. **El tiempo de `MPI_Bcast` incluye la espera**: un proceso que llega antes se queda
+2. **El tiempo de las colectivas incluye la espera**: un proceso que llega antes se queda
    esperando a los demás. Por eso ese tiempo mezcla comunicación real con desbalance de carga,
    y crece cuando hay más procesos que núcleos.
 
@@ -151,10 +182,15 @@ Dos aclaraciones para la defensa:
 
 - **Cómputo:** crece como N³ y se reparte entre los procesos, así que baja aproximadamente
   a la mitad al duplicar P.
-- **Comunicación:** crece como N² (se mandan filas, no la matriz entera) y **aumenta** con P.
+- **Comunicación:** crece como N² en volumen (se mandan filas, no la matriz entera), pero
+  además **el pivoteo agrega dos colectivas chiquitas por paso** (`Gather` + `Bcast`), o sea
+  ~2N colectivas en total. Esas son de *latencia*, no de volumen: casi no mandan datos pero
+  cuestan tiempo, y ese costo **crece con P**. Es el precio de la estabilidad numérica.
 - Por eso el speedup mejora hasta cierto punto y después se achata: llega un momento en que
   la comunicación pesa más que lo que se gana repartiendo las cuentas.
 - **Speedup:** S(P) = tiempo total de `LU_Serial` / tiempo total de `LU_MPI` con P procesos.
   **Eficiencia:** E(P) = S(P) / P.
-- **Precisión:** el residuo relativo tiene que quedar cerca de 1e-15 y **no depender de P**.
-  Si cambia al cambiar la cantidad de procesos, hay un error en la versión paralela.
+- **Precisión:** el residuo relativo **no tiene que depender de P**. Como los dos programas
+  generan la misma matriz y eligen los mismos pivotes, el residuo de `LU_MPI` tiene que dar
+  **idéntico** al de `LU_Serial` para cualquier cantidad de procesos. Si cambia al cambiar P,
+  hay un error en la versión paralela.
