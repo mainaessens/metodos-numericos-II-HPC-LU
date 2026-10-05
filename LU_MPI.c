@@ -13,6 +13,9 @@
  *     a medida que k avanza, las filas de arriba ya no trabajan; con el reparto
  *     ciclico todos los procesos siguen teniendo filas por debajo de k.
  *
+ * El programa mide por separado el tiempo de COMPUTO y el de COMUNICACION,
+ * para poder analizar como escala cada uno al aumentar N y la cantidad de procesos.
+ *
  * Funciones MPI usadas (todas de la teoria / TP1):
  *   MPI_Init, MPI_Comm_rank, MPI_Comm_size, MPI_Finalize, MPI_Wtime,
  *   MPI_Barrier, MPI_Scatter, MPI_Bcast, MPI_Gather, MPI_Reduce.
@@ -28,8 +31,9 @@
 
 /* Igual que en LU_Serial.c: matriz guardada fila por fila, (i, j) -> A[i*N + j]. */
 
-/* Genera A (diagonalmente dominante) y b = A * (1,1,...,1). Misma semilla que
-   LU_Serial.c, asi los dos programas factorizan exactamente la misma matriz. */
+/* Genera A (diagonalmente dominante, por lo tanto invertible) y b = A*(1,...,1).
+   Misma semilla que LU_Serial.c, asi los dos programas factorizan exactamente
+   la misma matriz y los resultados se pueden comparar. */
 void generar_matriz(double *A, double *b, int N)
 {
     int i, j;
@@ -64,18 +68,22 @@ void resolver(double *LU, double *b, double *x, int N)
     }
 }
 
-/* Norma 2 del residuo ||A x - b|| con la matriz A original. */
-double residuo(double *A, double *x, double *b, int N)
+/* Norma 2 del residuo ||A x - b|| con la matriz A original, y en *rel el
+   residuo relativo ||A x - b|| / ||b||. */
+double residuo(double *A, double *x, double *b, int N, double *rel)
 {
     int i, j;
-    double r, suma = 0.0;
+    double r, suma = 0.0, normab = 0.0;
     for (i = 0; i < N; i++) {
         r = -b[i];
         for (j = 0; j < N; j++)
             r += A[i*N + j] * x[j];
         suma += r * r;
+        normab += b[i] * b[i];
     }
-    return sqrt(suma);
+    suma = sqrt(suma);
+    *rel = suma / sqrt(normab);
+    return suma;
 }
 
 int main(int argc, char *argv[])
@@ -85,8 +93,10 @@ int main(int argc, char *argv[])
     int i, j, k, l, p, duenio;
     double *A = NULL, *buf = NULL, *LU = NULL, *b = NULL, *x = NULL;  /* solo proceso 0 */
     double *Aloc, *filak, *fila;                                      /* todos los procesos */
-    double mult, error;
-    double t0, t1, t2, t3, t_fact, t_total, t_fact_max, t_total_max;
+    double mult, error, res, res_rel;
+    double t, t_ini;
+    double t_comp = 0.0, t_comm = 0.0, t_total;      /* tiempos de ESTE proceso */
+    double t_comp_max, t_comm_max, t_total_max;      /* del proceso mas lento */
 
     MPI_Init(&argc, &argv);
     MPI_Comm_rank(MPI_COMM_WORLD, &rank);
@@ -125,13 +135,14 @@ int main(int argc, char *argv[])
                     buf[(p*nloc + l)*N + j] = A[(l*P + p)*N + j];
     }
 
+    /* Todos arrancan a medir juntos. */
     MPI_Barrier(MPI_COMM_WORLD);
-    t0 = MPI_Wtime();
+    t_ini = MPI_Wtime();
 
-    /* ---------- Reparto: cada proceso recibe sus nloc filas ---------- */
+    /* ---------- COMUNICACION: reparto inicial de las filas ---------- */
+    t = MPI_Wtime();
     MPI_Scatter(buf, nloc * N, MPI_DOUBLE, Aloc, nloc * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
-
-    t1 = MPI_Wtime();
+    t_comm += MPI_Wtime() - t;
 
     /* ---------- Factorizacion LU en paralelo ---------- */
     for (k = 0; k < N - 1; k++) {
@@ -143,9 +154,14 @@ int main(int argc, char *argv[])
             fila = &Aloc[(k / P) * N];
         else
             fila = filak;
-        MPI_Bcast(&fila[k], N - k, MPI_DOUBLE, duenio, MPI_COMM_WORLD);
 
-        /* Cada proceso actualiza sus filas que estan DEBAJO de la fila k. */
+        /* COMUNICACION: difusion de la fila pivote. */
+        t = MPI_Wtime();
+        MPI_Bcast(&fila[k], N - k, MPI_DOUBLE, duenio, MPI_COMM_WORLD);
+        t_comm += MPI_Wtime() - t;
+
+        /* COMPUTO: cada proceso actualiza sus filas que estan DEBAJO de la fila k. */
+        t = MPI_Wtime();
         for (l = 0; l < nloc; l++) {
             i = l * P + rank;                 /* numero de fila global */
             if (i <= k)
@@ -155,19 +171,19 @@ int main(int argc, char *argv[])
             for (j = k + 1; j < N; j++)
                 Aloc[l*N + j] -= mult * fila[j];
         }
+        t_comp += MPI_Wtime() - t;
     }
 
-    t2 = MPI_Wtime();
-
-    /* ---------- Juntar el resultado en el proceso 0 ---------- */
+    /* ---------- COMUNICACION: juntar el resultado en el proceso 0 ---------- */
+    t = MPI_Wtime();
     MPI_Gather(Aloc, nloc * N, MPI_DOUBLE, buf, nloc * N, MPI_DOUBLE, 0, MPI_COMM_WORLD);
+    t_comm += MPI_Wtime() - t;
 
-    t3 = MPI_Wtime();
+    t_total = MPI_Wtime() - t_ini;
 
     /* El tiempo del programa es el del proceso mas lento: se toma el maximo. */
-    t_fact  = t2 - t1;
-    t_total = t3 - t0;
-    MPI_Reduce(&t_fact,  &t_fact_max,  1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&t_comp,  &t_comp_max,  1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
+    MPI_Reduce(&t_comm,  &t_comm_max,  1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
     MPI_Reduce(&t_total, &t_total_max, 1, MPI_DOUBLE, MPI_MAX, 0, MPI_COMM_WORLD);
 
     /* ---------- Proceso 0: reordenar, resolver y verificar ---------- */
@@ -184,12 +200,19 @@ int main(int argc, char *argv[])
         for (i = 0; i < N; i++)
             if (fabs(x[i] - 1.0) > error)
                 error = fabs(x[i] - 1.0);
+        res = residuo(A, x, b, N, &res_rel);
 
         printf("LU MPI  N = %d  procesos = %d\n", N, P);
-        printf("Tiempo de factorizacion: %f s\n", t_fact_max);
-        printf("Tiempo total (con Scatter y Gather): %f s\n", t_total_max);
-        printf("Residuo ||Ax - b||:      %e\n", residuo(A, x, b, N));
-        printf("Error maximo |x - 1|:    %e\n", error);
+        printf("Tiempo de computo:        %f s\n", t_comp_max);
+        printf("Tiempo de comunicacion:   %f s\n", t_comm_max);
+        printf("Tiempo total:             %f s\n", t_total_max);
+        printf("Residuo ||Ax - b||:       %e\n", res);
+        printf("Residuo relativo:         %e\n", res_rel);
+        printf("Error maximo |x - 1|:     %e\n", error);
+        /* Linea lista para copiar a una planilla (N, P, computo, comunicacion,
+           total, residuo, residuo relativo): */
+        printf("CSV,%d,%d,%f,%f,%f,%e,%e\n",
+               N, P, t_comp_max, t_comm_max, t_total_max, res, res_rel);
 
         free(A); free(buf); free(LU); free(b); free(x);
     }
